@@ -31,3 +31,5 @@ def process(data):
    exclusive[s['id']]=str(s['end']-s['start']-covered)
   traces.append({'trace':trace,'roots':roots,'wall_time':str(critical),'self_time':exclusive,'services':sorted({s['service'] for s in rows}),'children':{k:sorted(v) for k,v in children.items()}})
  return {'traces':traces,'summary':{'spans':len(spans),'traces':len(traces),'roots':sum(len(t['roots']) for t in traces)}}
+
+from .sharing import project_for_sharing

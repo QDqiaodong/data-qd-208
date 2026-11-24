@@ -1,6 +1,6 @@
 # data-qd-208 · 分布式追踪因果链
 
-校验同一trace的父子span、检测环路，输出根、服务集合、子树和墙钟跨度。
+校验同一trace的父子span、检测环路，输出根、服务集合、直接子节点、扣除子调用重叠后的自身时间及墙钟跨度。
 
 本仓主要交付是Python业务API和可供下游使用的结构化数据，不是通用CLI、报表或CRUD模板。字段、身份、单位、上限与失败边界见 [数据契约](docs/contract.md)。
 
@@ -31,7 +31,7 @@ publish("run/another.json", process(load("fixtures/input.json")))
 {"roots": 1, "spans": 3, "traces": 1}
 ```
 
-已通过 6 项业务测试，并核对非法输入拒绝；样例数据全部原创合成，见 [来源](fixtures/SOURCES.md)。
+已通过 7 项业务测试，并核对非法输入拒绝；样例数据全部原创合成，见 [来源](fixtures/SOURCES.md)。
 
 ## 边界
 

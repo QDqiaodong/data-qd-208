@@ -1,0 +1,11 @@
+[build-system]
+requires=["setuptools==80.9.0","wheel==0.45.1"]
+build-backend="setuptools.build_meta"
+[project]
+name="data-qd-208"
+version="0.1.0"
+description="分布式追踪因果链"
+requires-python=">=3.11"
+dependencies=[]
+[tool.setuptools.packages.find]
+where=["src"]

@@ -1,0 +1,28 @@
+{
+  "spans": [
+    {
+      "id": "root",
+      "trace": "t1",
+      "parent": null,
+      "service": "api",
+      "start": "0",
+      "end": "10"
+    },
+    {
+      "id": "db",
+      "trace": "t1",
+      "parent": "root",
+      "service": "db",
+      "start": "2",
+      "end": "8"
+    },
+    {
+      "id": "cache",
+      "trace": "t1",
+      "parent": "root",
+      "service": "cache",
+      "start": "3",
+      "end": "5"
+    }
+  ]
+}

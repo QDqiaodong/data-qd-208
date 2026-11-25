@@ -60,3 +60,36 @@ interval 内各所有 span 的拥有时长之和为 exposure 总和。总和为�
 budgets 的 `(account,service,unit)` 唯一，account 必须出现在 ownership，`(service,unit)` 必须出现在 meters。所有正整数结算组合和 requests 引用组合都必须有 budget。`settled` 是该组合所有 meter interval 分配整数之和，`used=committed+settled`，`remaining=limit-used`；允许 used 超过 limit，此时 `status="exceeded"` 且 remaining 为负，否则为 `within`。每个 request 是独立 what-if，不修改 budget 或后续请求观察到的用量；当任一 item 的 `used + units > limit` 时 `status="blocked"`，并在 `deficits` 中按 `service`、`unit` 排序列出全部失败项的 `deficit=used+units-limit`，否则 `allowed` 且 deficits 为空。
 
 结果顶层恰含 `schema`、`meters`、`spans`、`budgets`、`requests`。meters 按 id 排序，每项恰含 `id`、`service`、`unit`、`intervals`、`total_delta`、`total_allocated`、`total_unassigned`；intervals 按时间排序，每项恰含 `from`、`to`、`delta`、`allocations`、`unassigned`；allocations 只含正单位并按 span id 排序，每项恰含 `span`、`trace`、`account`、`units`。spans 按 id 排序，每项恰含 `id`、`trace`、`service`、`account`、`usage`，usage 按 unit 排序且只含正用量。budgets 按 account、service、unit 排序，包含输入五字段及 `settled`、`used`、`remaining`、`status`。requests 按 id 排序，每项恰含 `id`、`account`、`status`、`deficits`。`from`/`to` 原样保留输入中的十进制字符串。
+
+## 离线数据保留与合规擦除规划
+
+`plan_trace_retention(data)` 只处理对象生命周期：在原始片段被多个分析制品复用、同时存在分级保留策略、调查冻结和擦除请求时，给出当前允许销毁的对象、必须保留的最小对象集，以及每个请求完成或被阻塞的原因。它不连接外部平台、不改变其他业务模块、不新增运行时第三方依赖，不修改输入，且所有时间运算只用 `Fraction`，绝不转成浮点数。输入顶层恰含 `now`、`objects`、`products`、`policies`、`holds`、`requests`；任何未知字段、类型错误、越界、重复身份、坏引用、依赖成环、互斥策略或不可能的生命周期都抛 `ValueError`，先完整校验再规划，不返回部分结果。
+
+### 对象与依赖图
+
+`objects` 为 1..100000 项，每项恰含 `id`、`trace`、`kind`、`created`、`expires`、`subjects`、`depends_on`。标识沿用 ASCII 契约；`kind` 为 `raw`、`derived` 或 `catalog`。`created<=now`；`expires` 为 `null` 或不早于 `created`。`subjects` 为 0..64 个互不重复的主体标识；`depends_on` 为 0..256 个互不重复且存在的对象 id，不能引用自己。raw 不得依赖其他对象；derived 至少依赖一个对象；catalog 依赖可为空。整个依赖图必须无环；所有坏引用在完整 id 表建立后统一检查，因此拒绝行为与输入顺序无关。同一对象可被多个 product 或上游对象共享。
+
+### 分级保留策略与对象期限
+
+`policies` 为 1..4096 项，每项恰含 `id`、`trace`、`kind`、`keep_until`、`priority`；`trace` 为对象中存在的 trace 或 `*`，`kind` 为三种对象 kind 或 `*`，`priority` 为 0..1000000000 的整数，`keep_until` 不得早于 `now`。每个对象必须能被至少一条策略命中，并按最高 `priority` 选出唯一胜选策略；同一最高 priority 若有多条策略同时可命中某对象，只有 `keep_until` 完全相同才合法，否则整份文档拒绝（通配选择器按数据中实际出现的 trace/kind 展开判定）。对象的政策期限是胜选策略的 `keep_until` 与自身非空 `expires` 中的较晚者；`expires` 为 `null` 时只采用策略期限。对象自身 `expires` 已过不能忽略更长的合规策略。`now >= 政策期限` 时输出 `expired=true`（边界相等即过期）。
+
+### 产品、证据闭包与冻结
+
+`products` 为 0..10000 项，每项恰含 `id`、`roots`、`status`；roots 为 1..256 个互不重复且存在的对象，`status` 为 `active` 或 `retired`。产品的证据闭包是 roots 及其递归 `depends_on`。active product 的闭包必须保持可重建；retired product 不施加保留义务，但其对象仍可能因别的职责保留。
+
+`holds` 为 0..4096 项，每项恰含 `id`、`roots`、`mode`、`closed`，`mode` 为 `evidence` 或 `rebuild`，`closed` 为严格布尔。未关闭的 evidence hold 只冻结 roots 本身；未关闭的 rebuild hold 冻结 roots 的完整依赖闭包。已关闭 hold 不保留任何对象，但仍在输出中报告且其 `objects` 为空。冻结对象无论期限和擦除请求如何都不能销毁。
+
+### 擦除请求与规范目标集
+
+`requests` 为 0..4096 项，每项恰含 `id`、`subject`、`submitted`、`scope`，id 全局唯一，`submitted<=now`，`scope` 为 `direct` 或 `rebuildable`。direct 请求只以直接含该 subject 的对象为目标；rebuildable 请求还把这些对象的全部递归祖先（沿反向 depends_on 可达的对象）纳入目标，因为保留这种不含 subject 但闭包内含 subject 的祖先仍可重建受影响证据。多个请求彼此独立评估，都基于同一份当前数据，不因前一个请求的拟议删除改变后一个请求看到的状态。
+
+对每个请求先计算政策期限、active product 最小重建闭包和未关闭 hold 的冻结集合，再独立判定：
+
+1. 目标对象若被未关闭 hold 冻结，或 `now` 严格早于其政策期限，即阻塞请求；两类阻塞独立报告。
+2. active product 的职责是请求执行后每个 root 仍至少有一条完整可重建证据路线，而不是所有现有依赖永远保留。目标覆盖某对象时，可在同一 product 已引用的共享依赖中改用不含该 subject 的路线；不能为保住 product 而保留仍可重建该 subject 的目标对象。依赖按 AND 解释：保留某 derived/catalog 对象时其全部直接依赖都必须保留；product 的多个 roots 按 OR 解释，只需至少一个 root 的完整闭包可用。排除请求 targets 后没有合格 root 的 product 阻塞请求。对每个请求，排除 targets 后仍有两个及以上合格 root 的 active products 最多 18 个，且这些产品的合格 roots 总数最多 36；其余未阻塞 active product 必须恰有一个合格 root。任一请求越界都整体抛 `ValueError`，不做局部或近似规划。
+3. 请求 blocked 时不提出部分删除：`delete` 与 `selections` 为空，并列出全部阻塞对象对应的 policy/hold/product。请求 completed 时，`delete` 是目标对象连同因失去全部使用方而变得可回收的过期对象构成的最大安全集合；仍被 active product 选中路线、未关闭 hold、未到期政策，或集合外保留对象的 AND 依赖所要求的对象不得作为级联垃圾删除。
+4. completed 请求同时给出每个 active product 选择的保留 root：先最小化所有选中 root 完整闭包的对象并集大小，再最小化选中 root 数量（产品数固定时即退化为决胜规则），仍相同则比较按 product id 排序后的 `product:root` 列表字典序。选择与 delete 集共同求解，不逐 product 独立取局部最小闭包，也不在选择后再贪心删除共享对象。
+
+### 输出
+
+结果可 JSON 序列化，顶层恰含 `schema`、`objects`、`holds`、`requests`，`schema` 固定为 `trace-retention-plan-v1`。objects 按 id 排序，每项恰含 `id`、`trace`、`kind`、`policy_until`、`expired`、`held_by`、`active_products`；`policy_until` 为规范化精确十进制字符串（零为 `0`，无正号和无意义零），`held_by` 与 `active_products` 均按 id 排序。holds 按 id 排序，每项恰含 `id`、`mode`、`closed`、`objects`，`objects` 是按 mode 计算的规范冻结集合并按 object id 排序，已关闭时为空。requests 按 id 排序，每项始终含 `id`、`subject`、`scope`、`status`、`targets`、`delete`、`blockers`、`selections`；`targets`、`delete` 按 object id 排序，`blockers` 按 `kind`、`ref` 排序且去重，每项恰含 `kind`（`policy`、`hold` 或 `product`）、`ref`，`selections` 按 product id 排序，每项恰含 `product`、`root`。blocked 时 `delete` 与 `selections` 必须为空；completed 时 `blockers` 必须为空。输出不依赖任何输入列表顺序，也不复用可被调用方修改的可变输入对象。

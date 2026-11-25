@@ -46,3 +46,17 @@ spans为1..2000项全局唯一id、trace、parent(null或span id)、service、st
 ### 输出
 
 结果顶层恰含 `schema`、`snapshots`、`attestations`、`bundles`。snapshots 按 id 排序，每项恰含 `id`、`source_digest`、`analysis_digest`；attestations 按 id 排序，每项恰含 `id`、`snapshot`、`content_status`、`mismatches`、`withdrawn`、`withdrawal_id`、`superseded_by`、`usable`，两个可空 id 为 `null`；bundles 按 id 排序，每项恰含 `id`、`seal`、`expected_seal`、`status`、`issues`。
+
+## 资源用量结算与配额准入
+
+`settle_trace_metering(data)` 接收恰好含 `spans`、`meters`、`ownership`、`budgets`、`requests` 的对象，返回 `trace-meter-settlement-v1` 结果。spans 直接复用 `process({"spans": spans})` 的完整契约校验；其余字段也必须先完整校验。任何未知字段、类型/范围错误、重复身份、坏引用、非法累计读数，或已产生正整数归因/被请求引用但缺少唯一 budget 政策，都抛 `ValueError`。函数不修改输入、不连接外部平台，时间只用 `Fraction`，数值累计只用整数或 `Fraction`。
+
+`ownership` 必须恰好覆盖每个不同 trace 一次；每项为 `trace`、`account`。meter 是独立物理累计器：`id` 在 meters 内唯一，相同 `service`/`unit` 的多只 meter 不合并。readings 按精确 `at` 时间排序（同一 meter 的时间点必须按 `Fraction` 互不相同），相邻读数形成半开区间 `[from,to)`。上升或持平增量为后值减前值；下降只有在 `modulus` 非空且所有读数小于 modulus 时解释为恰好一次回卷，增量为 `modulus - 前值 + 后值`。无 modulus 的下降、越界值或 modulus 上的读数均拒绝。零增量也输出 interval；首个读数只是基线。
+
+同 service 所有权按任意深度祖先关系确定：把 meter 边界和同 service span 的 start/end 作为分点，在每个基本时间段内，只有不存在同时活动的同 service 严格后代的活动 span 拥有该时间。多个无祖先关系的分支可同时拥有同一时间；跨 service 后代不剥夺所有权。零时长 span exposure 为零；允许父子区间越界，只按真实同时活动判断，不能使用只看直接孩子的 self_time。
+
+interval 内各所有 span 的拥有时长之和为 exposure 总和。总和为零时整个 delta 计入 `unassigned`；否则精确份额为 `delta * exposure / exposure总和`，先取整数下界，剩余单位按小数余数从大到小补 1，余数相同按 span id 字典序升序补 1。每个 interval 严格满足 `sum(allocations.units) + unassigned = delta`。分配单位经 trace 归入 account；unassigned 不归账户。
+
+budgets 的 `(account,service,unit)` 唯一，account 必须出现在 ownership，`(service,unit)` 必须出现在 meters。所有正整数结算组合和 requests 引用组合都必须有 budget。`settled` 是该组合所有 meter interval 分配整数之和，`used=committed+settled`，`remaining=limit-used`；允许 used 超过 limit，此时 `status="exceeded"` 且 remaining 为负，否则为 `within`。每个 request 是独立 what-if，不修改 budget 或后续请求观察到的用量；当任一 item 的 `used + units > limit` 时 `status="blocked"`，并在 `deficits` 中按 `service`、`unit` 排序列出全部失败项的 `deficit=used+units-limit`，否则 `allowed` 且 deficits 为空。
+
+结果顶层恰含 `schema`、`meters`、`spans`、`budgets`、`requests`。meters 按 id 排序，每项恰含 `id`、`service`、`unit`、`intervals`、`total_delta`、`total_allocated`、`total_unassigned`；intervals 按时间排序，每项恰含 `from`、`to`、`delta`、`allocations`、`unassigned`；allocations 只含正单位并按 span id 排序，每项恰含 `span`、`trace`、`account`、`units`。spans 按 id 排序，每项恰含 `id`、`trace`、`service`、`account`、`usage`，usage 按 unit 排序且只含正用量。budgets 按 account、service、unit 排序，包含输入五字段及 `settled`、`used`、`remaining`、`status`。requests 按 id 排序，每项恰含 `id`、`account`、`status`、`deficits`。`from`/`to` 原样保留输入中的十进制字符串。
